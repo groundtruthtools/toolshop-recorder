@@ -1,0 +1,69 @@
+# Nightly hiring history for companyfacts.dev and the groundtruth Apify Actors.
+# The code lives in the private groundtruthtools/toolshop repo (scripts/cloud_recorder.py);
+# this workflow only schedules it. Schedule and manual runs only: no pull request
+# trigger, so repository secrets never reach code from a fork.
+name: nightly hiring history
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # 04:17 UTC, hours before the PC fallback (08:00 or 09:00 UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write   # only to commit status/last-run.json, which also keeps the schedule alive
+
+concurrency:
+  group: recorder
+  cancel-in-progress: false
+
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - name: Check out this repo (status file)
+        uses: actions/checkout@v4
+        with:
+          path: status-repo
+
+      - name: Check out the recorder code
+        uses: actions/checkout@v4
+        with:
+          repository: groundtruthtools/toolshop
+          ref: master
+          ssh-key: ${{ secrets.TOOLSHOP_DEPLOY_KEY }}
+          path: toolshop
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet certifi
+
+      - name: Write .env from secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          umask 077
+          printf 'CLOUDFLARE_API_TOKEN=%s\nCLOUDFLARE_ACCOUNT_ID=%s\n' "$CLOUDFLARE_API_TOKEN" "$CLOUDFLARE_ACCOUNT_ID" > toolshop/.env
+
+      - name: Record boards and publish the job feeds
+        working-directory: toolshop
+        run: python -u scripts/cloud_recorder.py cloud --summary ../status-repo/status/last-run.json
+
+      - name: Remove .env
+        if: always()
+        run: rm -f toolshop/.env
+
+      - name: Commit the run status
+        if: always()
+        working-directory: status-repo
+        run: |
+          [ -f status/last-run.json ] || exit 0
+          git config user.name "toolshop-recorder"
+          git config user.email "actions@users.noreply.github.com"
+          git add status/last-run.json
+          git commit -q -m "Run $(date -u +%F)" || exit 0
+          git push -q
